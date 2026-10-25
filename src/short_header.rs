@@ -598,6 +598,7 @@ pub fn decode_short_header_macroblocks(
                     ac_pred_flag: false,
                     alternate_vertical_scan: false,
                     intra_mismatch_exempt: false,
+                    idct: crate::compat::IdctKind::Exact,
                 };
                 let mut residual = InterMacroblock::zero();
                 for (i, &is_coded) in coded.iter().enumerate() {

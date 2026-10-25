@@ -323,6 +323,8 @@ pub struct MacroblockTextureContext {
     /// on the non-intra decode paths or under method 2
     /// (`quant_type == false`).
     pub intra_mismatch_exempt: bool,
+    /// Which inverse DCT reconstructs the block (see [`crate::compat::IdctKind`]).
+    pub idct: crate::compat::IdctKind,
 }
 
 /// A reconstructed intra 4:2:0 macroblock: a 16×16 luminance plane plus
@@ -671,7 +673,7 @@ fn decode_intra_block_tail(
 
     // §7.4.5 + Annex A — inverse DCT (output saturated to
     // [-2^bpp, 2^bpp - 1]).
-    let spatial = idct_8x8(&f, ctx.bits_per_pixel);
+    let spatial = inverse_dct(ctx.idct, &f, ctx.bits_per_pixel);
 
     // §6.3.2 / §7.6 — for an intra block there is no prediction to add,
     // so the reconstructed sample is the IDCT output clipped to the
@@ -950,7 +952,19 @@ pub fn inter_block_from_events(
 
     // §7.4.5 + Annex A — inverse DCT. `idct_8x8` already saturates to
     // [-2^bpp, 2^bpp - 1]; the result is the §7.3 step-2 residual.
-    Ok(idct_8x8(&f, ctx.bits_per_pixel))
+    Ok(inverse_dct(ctx.idct, &f, ctx.bits_per_pixel))
+}
+
+/// The inverse DCT the context selects (see [`crate::compat::IdctKind`]).
+fn inverse_dct(
+    kind: crate::compat::IdctKind,
+    f: &[[i32; 8]; 8],
+    bits_per_pixel: u32,
+) -> [[i32; 8]; 8] {
+    match kind {
+        crate::compat::IdctKind::Exact => idct_8x8(f, bits_per_pixel),
+        crate::compat::IdctKind::Xvid => crate::xvid_idct::xvid_idct_8x8(f, bits_per_pixel),
+    }
 }
 
 /// Decode and reconstruct one inter 4:2:0 macroblock's signed-residual
@@ -1148,6 +1162,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let predictors = BlockPredictors::outside(8, 8);
 
@@ -1232,6 +1247,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let predictors = BlockPredictors::outside(8, 8);
 
@@ -1279,6 +1295,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let predictors = BlockPredictors::outside(8, 8);
 
@@ -1323,6 +1340,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let predictors = BlockPredictors::outside(8, 8);
         let data = [0xAAu8; 4]; // arbitrary — must remain unread
@@ -1365,6 +1383,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let predictors = BlockPredictors::outside(8, 8);
         let mut w = BitWriter::default();
@@ -1403,6 +1422,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let predictors = BlockPredictors::outside(8, 8);
         let mut w = BitWriter::default();
@@ -1455,6 +1475,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let predictors = BlockPredictors::outside(8, 8);
 
@@ -1516,6 +1537,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let predictors = BlockPredictors::outside(8, 8);
 
@@ -1567,6 +1589,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let data = [0u8; 4];
         let mut br = BitReader::new(&data);
@@ -1600,6 +1623,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let data = [0u8; 4];
         let mut br = BitReader::new(&data);
@@ -1626,6 +1650,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         // Two bytes of garbage — none of it should be consumed because
         // `coded == false` short-circuits before the bit reader is touched.
@@ -1659,6 +1684,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
 
         let mut w = BitWriter::default();
@@ -1697,6 +1723,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
 
         let mut w = BitWriter::default();
@@ -1740,6 +1767,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let data = [0u8; 4];
         let mut br = BitReader::new(&data);
@@ -1785,6 +1813,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
 
         let mut w = BitWriter::default();
@@ -1851,6 +1880,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let data = [0u8; 4];
         let mut br = BitReader::new(&data);
@@ -1889,6 +1919,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let data = [0u8; 4];
         let mut br = BitReader::new(&data);
@@ -1921,6 +1952,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let mut w = BitWriter::default();
         // Block 0 — one positive (LAST=1, RUN=0, LEVEL=1) inter EVENT.
@@ -1982,6 +2014,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let data = [0u8; 4];
         let mut br = BitReader::new(&data);
@@ -2020,6 +2053,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
 
         let mut w = BitWriter::default();
@@ -2060,6 +2094,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: false,
+            idct: crate::compat::IdctKind::Exact,
         };
         let predictors = BlockPredictors::outside(8, 8);
 
@@ -2109,6 +2144,7 @@ mod tests {
             ac_pred_flag: false,
             alternate_vertical_scan: false,
             intra_mismatch_exempt: true,
+            idct: crate::compat::IdctKind::Exact,
         };
         let predictors = BlockPredictors::outside(8, 8);
         let mut w = BitWriter::default();
