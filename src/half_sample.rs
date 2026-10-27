@@ -397,6 +397,49 @@ pub fn interpolate_block_into(
     let (mvx_int, half_x) = split_half_pel(mv_x);
     let (mvy_int, half_y) = split_half_pel(mv_y);
     let rc = vop_rounding_type & 1;
+    let x0 = origin_x + mvx_int;
+    let y0 = origin_y + mvy_int;
+    // Every sample the block reads, its half-pel neighbours included, lies inside the plane:
+    // no fetch needs the §7.6.4 clamp, so rows are read directly (the same arithmetic as
+    // `interpolate_pixel`, without a bounds clamp per sample).
+    let inside = x0 >= 0
+        && y0 >= 0
+        && x0 + block_w as i32 + i32::from(half_x) <= vop.width
+        && y0 + block_h as i32 + i32::from(half_y) <= vop.height;
+    if inside && block_w > 0 {
+        let stride = vop.stride as usize;
+        let (x0, y0) = (x0 as usize, y0 as usize);
+        let rc = u32::from(rc);
+        for (j, dst) in out.chunks_exact_mut(block_w).take(block_h).enumerate() {
+            let at = (y0 + j) * stride + x0;
+            let a = &vop.samples[at..at + block_w + usize::from(half_x)];
+            match (half_x, half_y) {
+                (false, false) => dst.copy_from_slice(&a[..block_w]),
+                (true, false) => {
+                    for (i, d) in dst.iter_mut().enumerate() {
+                        *d = ((u32::from(a[i]) + u32::from(a[i + 1]) + 1 - rc) / 2) as u8;
+                    }
+                }
+                (false, true) => {
+                    let c = &vop.samples[at + stride..at + stride + block_w];
+                    for (i, d) in dst.iter_mut().enumerate() {
+                        *d = ((u32::from(a[i]) + u32::from(c[i]) + 1 - rc) / 2) as u8;
+                    }
+                }
+                (true, true) => {
+                    let c = &vop.samples[at + stride..at + stride + block_w + 1];
+                    for (i, d) in dst.iter_mut().enumerate() {
+                        let sum = u32::from(a[i])
+                            + u32::from(a[i + 1])
+                            + u32::from(c[i])
+                            + u32::from(c[i + 1]);
+                        *d = ((sum + 2 - rc) / 4) as u8;
+                    }
+                }
+            }
+        }
+        return;
+    }
     for j in 0..block_h {
         for i in 0..block_w {
             let int_x = origin_x + (i as i32) + mvx_int;
@@ -679,6 +722,97 @@ mod tests {
                 for &mvy in &[0i32, 1, -1, 3] {
                     let out = interpolate_block(&vop, mvx, mvy, 0, 0, 8, 8, rc);
                     assert!(out.iter().all(|&v| v == 42), "mv=({mvx},{mvy}) rc={rc}");
+                }
+            }
+        }
+    }
+
+    /// The per-sample clamped interpolation the fast path must reproduce.
+    #[allow(clippy::too_many_arguments)]
+    fn reference_block(
+        vop: &ReferenceVop<'_>,
+        mv_x: i32,
+        mv_y: i32,
+        origin_x: i32,
+        origin_y: i32,
+        block_w: usize,
+        block_h: usize,
+        rc: u8,
+    ) -> Vec<u8> {
+        let (mvx_int, half_x) = split_half_pel(mv_x);
+        let (mvy_int, half_y) = split_half_pel(mv_y);
+        let mut out = vec![0u8; block_w * block_h];
+        for j in 0..block_h {
+            for i in 0..block_w {
+                out[j * block_w + i] = fetch_clamped_sample(
+                    vop,
+                    origin_x + i as i32 + mvx_int,
+                    origin_y + j as i32 + mvy_int,
+                    half_x,
+                    half_y,
+                    rc & 1,
+                );
+            }
+        }
+        out
+    }
+
+    /// The in-bounds fast path of `interpolate_block_into` equals the clamped per-sample
+    /// interpolation for every block shape, sub-pel case and rounding type, on planes whose
+    /// buffer ends at the last sample (so a read past it would panic) and on padded strides,
+    /// with vectors from far outside the plane to well inside it.
+    #[test]
+    fn block_interpolation_matches_clamped_per_sample_fetches() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let shapes = [(16, 16), (8, 8), (16, 8), (8, 16), (4, 4), (1, 1), (8, 4)];
+        for &(width, height, pad) in &[
+            (48usize, 32usize, 0usize),
+            (33, 21, 0),
+            (17, 9, 5),
+            (16, 16, 0),
+            (8, 8, 3),
+        ] {
+            let stride = width + pad;
+            let len = (height - 1) * stride + width;
+            let samples: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            let vop = ReferenceVop::with_stride(&samples, width, height, stride).unwrap();
+            for &(bw, bh) in &shapes {
+                for _ in 0..400 {
+                    let origin_x = (next() % (width as u64 + 8)) as i32 - 4;
+                    let origin_y = (next() % (height as u64 + 8)) as i32 - 4;
+                    let mv_x = (next() % 161) as i32 - 80;
+                    let mv_y = (next() % 161) as i32 - 80;
+                    let rc = (next() & 1) as u8;
+                    let mut fast = vec![0u8; bw * bh];
+                    interpolate_block_into(
+                        &vop, mv_x, mv_y, origin_x, origin_y, bw, bh, rc, &mut fast,
+                    );
+                    let want = reference_block(&vop, mv_x, mv_y, origin_x, origin_y, bw, bh, rc);
+                    assert_eq!(
+                        fast, want,
+                        "plane {width}x{height}+{pad}, block {bw}x{bh} at ({origin_x},{origin_y}), mv ({mv_x},{mv_y}), rc {rc}"
+                    );
+                }
+                // Blocks flush against each corner, with and without each half-pel bit.
+                for &(ox, oy) in &[
+                    (0, 0),
+                    (width as i32 - bw as i32, 0),
+                    (0, height as i32 - bh as i32),
+                    (width as i32 - bw as i32, height as i32 - bh as i32),
+                ] {
+                    for &(mx, my) in &[(0, 0), (1, 0), (0, 1), (1, 1), (-1, -1)] {
+                        for rc in 0..2u8 {
+                            let mut fast = vec![0u8; bw * bh];
+                            interpolate_block_into(&vop, mx, my, ox, oy, bw, bh, rc, &mut fast);
+                            assert_eq!(fast, reference_block(&vop, mx, my, ox, oy, bw, bh, rc));
+                        }
+                    }
                 }
             }
         }
